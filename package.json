@@ -1,0 +1,18 @@
+{
+  "name": "handbuilt-sampler-keys",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A playable sampling-keyboard engine built from a small set of original recordings, with deterministic zone/velocity selection, loop crossfade checks, bounded sample cache, offline parity report and a GUI.",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "samples": "node tools/generate-samples.mjs",
+    "offline": "node tools/offline.mjs",
+    "test": "node --test test/engine.test.mjs test/browser.test.mjs",
+    "test:engine": "node --test test/engine.test.mjs",
+    "test:browser": "node --test test/browser.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}

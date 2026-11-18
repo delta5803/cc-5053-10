@@ -1,0 +1,185 @@
+{
+  "sampleRate": 48000,
+  "notes": [
+    {
+      "file": "c2-soft.wav",
+      "name": "c2-soft",
+      "rootMidi": 36,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 31791,
+      "seconds": 0.662,
+      "loop": {
+        "start": 24960,
+        "end": 31791,
+        "bodyFrames": 5871,
+        "fadeFrames": 960
+      }
+    },
+    {
+      "file": "c2-hard.wav",
+      "name": "c2-hard",
+      "rootMidi": 36,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 31791,
+      "seconds": 0.662,
+      "loop": {
+        "start": 24960,
+        "end": 31791,
+        "bodyFrames": 5871,
+        "fadeFrames": 960
+      }
+    },
+    {
+      "file": "c3-soft.wav",
+      "name": "c3-soft",
+      "rootMidi": 48,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 31102,
+      "seconds": 0.648,
+      "loop": {
+        "start": 24000,
+        "end": 31102,
+        "bodyFrames": 6238,
+        "fadeFrames": 864
+      }
+    },
+    {
+      "file": "c3-hard.wav",
+      "name": "c3-hard",
+      "rootMidi": 48,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 31102,
+      "seconds": 0.648,
+      "loop": {
+        "start": 24000,
+        "end": 31102,
+        "bodyFrames": 6238,
+        "fadeFrames": 864
+      }
+    },
+    {
+      "file": "c4-soft.wav",
+      "name": "c4-soft",
+      "rootMidi": 60,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 28536,
+      "seconds": 0.595,
+      "loop": {
+        "start": 22080,
+        "end": 28536,
+        "bodyFrames": 5688,
+        "fadeFrames": 768
+      }
+    },
+    {
+      "file": "c4-hard.wav",
+      "name": "c4-hard",
+      "rootMidi": 60,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 28536,
+      "seconds": 0.595,
+      "loop": {
+        "start": 22080,
+        "end": 28536,
+        "bodyFrames": 5688,
+        "fadeFrames": 768
+      }
+    },
+    {
+      "file": "c5-soft.wav",
+      "name": "c5-soft",
+      "rootMidi": 72,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 26611,
+      "seconds": 0.554,
+      "loop": {
+        "start": 20160,
+        "end": 26611,
+        "bodyFrames": 5779,
+        "fadeFrames": 672
+      }
+    },
+    {
+      "file": "c5-hard.wav",
+      "name": "c5-hard",
+      "rootMidi": 72,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 26611,
+      "seconds": 0.554,
+      "loop": {
+        "start": 20160,
+        "end": 26611,
+        "bodyFrames": 5779,
+        "fadeFrames": 672
+      }
+    },
+    {
+      "file": "c6-soft.wav",
+      "name": "c6-soft",
+      "rootMidi": 84,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 24091,
+      "seconds": 0.502,
+      "loop": {
+        "start": 18240,
+        "end": 24091,
+        "bodyFrames": 5275,
+        "fadeFrames": 576
+      }
+    },
+    {
+      "file": "c6-hard.wav",
+      "name": "c6-hard",
+      "rootMidi": 84,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 24091,
+      "seconds": 0.502,
+      "loop": {
+        "start": 18240,
+        "end": 24091,
+        "bodyFrames": 5275,
+        "fadeFrames": 576
+      }
+    },
+    {
+      "file": "c7-soft.wav",
+      "name": "c7-soft",
+      "rootMidi": 96,
+      "layer": "soft",
+      "sampleRate": 48000,
+      "frames": 21593,
+      "seconds": 0.45,
+      "loop": {
+        "start": 16320,
+        "end": 21593,
+        "bodyFrames": 4793,
+        "fadeFrames": 480
+      }
+    },
+    {
+      "file": "c7-hard.wav",
+      "name": "c7-hard",
+      "rootMidi": 96,
+      "layer": "hard",
+      "sampleRate": 48000,
+      "frames": 21593,
+      "seconds": 0.45,
+      "loop": {
+        "start": 16320,
+        "end": 21593,
+        "bodyFrames": 4793,
+        "fadeFrames": 480
+      }
+    }
+  ]
+}

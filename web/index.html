@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>手工采样键盘 · Hand-built sampling keyboard</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div>
+        <h1>手工采样键盘</h1>
+        <p id="subtitle">6 个音区 × 2 个力度层，来自 12 段自制录音</p>
+      </div>
+    </div>
+    <div class="transport">
+      <button id="startBtn" class="primary" type="button">启动引擎</button>
+      <button id="panicBtn" type="button" title="停止所有声部">全部静音</button>
+      <div id="status" class="status" aria-live="polite"><span class="dot"></span><span class="text">未启动</span></div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel play">
+      <div class="panel-head">
+        <h2>演奏</h2>
+        <div class="voice-meter" title="逻辑声部 / 上限">
+          <span id="voiceCount">0</span><span class="slash">/</span><span id="voiceCap">24</span>
+          <span class="label">声部</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <label class="slider">
+          <span>力度 <output id="velOut">96</output></span>
+          <input id="velocity" type="range" min="1" max="127" value="96">
+          <span class="hint">1–75 柔和层 · 76–99 交叉淡化 · 100–127 明亮层</span>
+        </label>
+        <label class="slider">
+          <span>连奏重叠 <output id="legatoOut">70</output> ms</span>
+          <input id="legato" type="range" min="0" max="250" value="70">
+          <span class="hint">按住上一个键再按下一个键时，旧声部额外保持的释放时间</span>
+        </label>
+        <label class="toggle">
+          <input id="latched" type="checkbox">
+          <span>持续模式（按住延音，松开后可再触发）</span>
+        </label>
+        <label class="slider compact">
+          <span>声部上限 <output id="capOut">24</output></span>
+          <input id="voiceLimit" type="range" min="1" max="32" value="24">
+        </label>
+      </div>
+
+      <div id="voiceStrip" class="voice-strip" aria-live="polite">
+        <div class="empty">当前没有发声声部</div>
+      </div>
+
+      <div class="keyboard-wrap">
+        <div id="keyboard" class="keyboard" role="group" aria-label="采样键盘">
+          <div class="key-legend"><span>C2</span><span>C3</span><span>C4</span><span>C5</span><span>C6</span><span>C7</span></div>
+          <div id="keys" class="keys"></div>
+        </div>
+      </div>
+
+      <div class="keyhow">
+        <p><strong>点击/轻触</strong>琴键演奏，或用电脑键盘 <kbd>A</kbd><kbd>W</kbd><kbd>S</kbd><kbd>E</kbd><kbd>D</kbd><kbd>F</kbd><kbd>T</kbd><kbd>G</kbd><kbd>Y</kbd><kbd>H</kbd><kbd>U</kbd><kbd>J</kbd><kbd>K</kbd>（两排，C4 起）。
+        上下箭头调整力度，空格可触发当前高亮键。</p>
+      </div>
+    </section>
+
+    <aside class="panel result">
+      <div class="panel-head">
+        <h2>结果 · 分层触发</h2>
+        <span id="resultTag" class="tag">等待演奏</span>
+      </div>
+      <div id="lastEvent" class="last-event">
+        <div class="placeholder">每次按下都会在此显示选样依据、重采样比与层混合。</div>
+      </div>
+      <div class="meters">
+        <div class="meter">
+          <span class="meter-label">缓存驻留</span>
+          <div class="bar"><div id="cacheBar" class="fill"></div></div>
+          <span id="cacheText" class="meter-value">0 / 0 B</span>
+        </div>
+        <div class="meter">
+          <span class="meter-label">声部（含偷取尾音）</span>
+          <span id="audibleText" class="meter-value">0 发声 / 0 尾音</span>
+        </div>
+        <div class="meter">
+          <span class="meter-label">偷取 / 拒绝</span>
+          <span id="stealText" class="meter-value">0 / 0</span>
+        </div>
+        <div class="meter">
+          <span class="meter-label">输出电平</span>
+          <div class="bar"><div id="levelBar" class="fill level"></div></div>
+          <span id="levelText" class="meter-value">—</span>
+        </div>
+      </div>
+      <div class="panel-head sub">
+        <h2>声部明细</h2>
+        <span class="hint">正在使用的样本区间与包络阶段</span>
+      </div>
+      <div id="voiceTable" class="voice-table">
+        <div class="empty">声部启用后显示：音名 / 键区 / 样本 / 层 / 重采样 / 状态</div>
+      </div>
+      <div id="errors" class="errors" role="alert" aria-live="assertive"></div>
+    </aside>
+
+    <section class="panel rules">
+      <div class="panel-head">
+        <h2>键区与力度规则</h2>
+        <span class="hint">边界音符与重叠区采用明确规则，同一输入永远同一结果</span>
+      </div>
+      <div id="zoneTable" class="zone-table"></div>
+      <div id="velocityTable" class="velocity-table"></div>
+      <div class="panel-head sub">
+        <h2>循环点检查</h2>
+        <button id="loopBtn" type="button" class="ghost">运行循环检查</button>
+      </div>
+      <div id="loopTable" class="loop-table">
+        <div class="empty">点击按钮检查所有循环的接缝与稳态。</div>
+      </div>
+    </section>
+
+    <section class="panel offline">
+      <div class="panel-head">
+        <h2>离线对照</h2>
+        <span class="hint">与界面共用同一引擎；包含音高、选样、声部与循环核对</span>
+      </div>
+      <div id="offlineSummary" class="offline-summary">
+        <div class="empty">运行 <code>npm run offline</code> 生成报告，或点击下方按钮加载已有报告。</div>
+      </div>
+      <div class="offline-actions">
+        <button id="offlineBtn" type="button">加载离线报告</button>
+        <a class="ghost link" href="/docs/offline/summary.txt" target="_blank" rel="noopener">文本摘要</a>
+        <a class="ghost link" href="/docs/offline/audio/05-sustain.wav" target="_blank" rel="noopener">循环试听 WAV</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>声音由浏览器实时运算：选样 → 重采样 → 循环 → 包络。离线对照见 <code>docs/offline/</code>。</span>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

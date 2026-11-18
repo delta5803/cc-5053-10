@@ -1,0 +1,96 @@
+Sampling keyboard — offline parity report
+=========================================
+Recordings: 12 (6.82 s total, 48000 Hz), 1309792 B resident vs 2097152 B cache budget
+
+Key map
+  C2  [C-1.. F2]  MIDI   0..41  c2-soft.wav / c2-hard.wav
+        first zone, starts at MIDI 0
+  C3  [F#2.. F3]  MIDI  42..53  c3-soft.wav / c3-hard.wav
+        starts at ceiling midpoint of C2/C3 = 42; next zone starts at 54
+  C4  [F#3.. F4]  MIDI  54..65  c4-soft.wav / c4-hard.wav
+        starts at ceiling midpoint of C3/C4 = 54; next zone starts at 66
+  C5  [F#4.. F5]  MIDI  66..77  c5-soft.wav / c5-hard.wav
+        starts at ceiling midpoint of C4/C5 = 66; next zone starts at 78
+  C6  [F#5.. F6]  MIDI  78..89  c6-soft.wav / c6-hard.wav
+        starts at ceiling midpoint of C5/C6 = 78; next zone starts at 90
+  C7  [F#6.. G9]  MIDI  90..127  c7-soft.wav / c7-hard.wav
+        starts at ceiling midpoint of C6/C7 = 90
+
+Velocity layers
+  blend band 76..100 (linear)
+  v=  1 soft  soft=1.000 hard=0.000 amp=0.061  c4-soft
+  v=  2 soft  soft=1.000 hard=0.000 amp=0.063  c4-soft
+  v=  8 soft  soft=1.000 hard=0.000 amp=0.080  c4-soft
+  v= 20 soft  soft=1.000 hard=0.000 amp=0.131  c4-soft
+  v= 40 soft  soft=1.000 hard=0.000 amp=0.246  c4-soft
+  v= 63 soft  soft=1.000 hard=0.000 amp=0.412  c4-soft
+  v= 64 soft  soft=1.000 hard=0.000 amp=0.420  c4-soft
+  v= 75 soft  soft=1.000 hard=0.000 amp=0.510  c4-soft
+  v= 76 blend soft=0.960 hard=0.040 amp=0.518  c4-soft+c4-hard
+  v= 84 blend soft=0.640 hard=0.360 amp=0.587  c4-soft+c4-hard
+  v= 90 blend soft=0.400 hard=0.600 amp=0.640  c4-soft+c4-hard
+  v= 99 blend soft=0.040 hard=0.960 amp=0.723  c4-soft+c4-hard
+  v=100 hard  soft=0.000 hard=1.000 amp=0.733  c4-hard
+  v=110 hard  soft=0.000 hard=1.000 amp=0.829  c4-hard
+  v=127 hard  soft=0.000 hard=1.000 amp=1.000  c4-hard
+  extreme low velocity audible: v1=0.0233, v2=0.0239, v3=0.0248, v4=0.0257
+  level monotone over 1..127: true
+  blend always uses both layers: true
+
+Pitch after resampling
+  C#2  v 20 c2-soft     rate 1.0595 expect     69.3 Hz measured     69.3 Hz (+0.1 c) ok
+  C#2  v110 c2-hard     rate 1.0595 expect     69.3 Hz measured    69.37 Hz (+1.9 c) ok
+  C3   v 20 c3-soft     rate 1.0000 expect   130.81 Hz measured   130.81 Hz (+0 c) ok
+  C3   v110 c3-hard     rate 1.0000 expect   130.81 Hz measured   130.98 Hz (+2.3 c) ok
+  F#3  v 20 c4-soft     rate 0.7071 expect      185 Hz measured   185.01 Hz (+0.1 c) ok
+  F#3  v110 c4-hard     rate 0.7071 expect      185 Hz measured   185.21 Hz (+2 c) ok
+  B3   v 20 c4-soft     rate 0.9439 expect   246.94 Hz measured   246.96 Hz (+0.1 c) ok
+  B3   v110 c4-hard     rate 0.9439 expect   246.94 Hz measured   247.25 Hz (+2.1 c) ok
+  C4   v 20 c4-soft     rate 1.0000 expect   261.63 Hz measured   261.65 Hz (+0.1 c) ok
+  C4   v110 c4-hard     rate 1.0000 expect   261.63 Hz measured   261.96 Hz (+2.2 c) ok
+  F#4  v 20 c5-soft     rate 0.7071 expect   369.99 Hz measured      370 Hz (+0 c) ok
+  F#4  v110 c5-hard     rate 0.7071 expect   369.99 Hz measured   370.42 Hz (+2 c) ok
+  C5   v 20 c5-soft     rate 1.0000 expect   523.25 Hz measured   523.27 Hz (+0.1 c) ok
+  C5   v110 c5-hard     rate 1.0000 expect   523.25 Hz measured    523.9 Hz (+2.1 c) ok
+  F#5  v 20 c6-soft     rate 0.7071 expect   739.99 Hz measured   740.05 Hz (+0.1 c) ok
+  F#5  v110 c6-hard     rate 0.7071 expect   739.99 Hz measured    740.6 Hz (+1.4 c) ok
+  C6   v 20 c6-soft     rate 1.0000 expect   1046.5 Hz measured  1046.69 Hz (+0.3 c) ok
+  C6   v110 c6-hard     rate 1.0000 expect   1046.5 Hz measured  1047.51 Hz (+1.7 c) ok
+  F#6  v 20 c7-soft     rate 0.7071 expect  1479.98 Hz measured  1480.38 Hz (+0.5 c) ok
+  F#6  v110 c7-hard     rate 0.7071 expect  1479.98 Hz measured  1480.41 Hz (+0.5 c) ok
+  C7   v 20 c7-soft     rate 1.0000 expect     2093 Hz measured  2094.62 Hz (+1.3 c) ok
+  C7   v110 c7-hard     rate 1.0000 expect     2093 Hz measured  2093.59 Hz (+0.5 c) ok
+  E7   v 20 c7-soft     rate 1.2599 expect  2637.02 Hz measured  2641.79 Hz (+3.1 c) ok
+  E7   v110 c7-hard     rate 1.2599 expect  2637.02 Hz measured   2646.1 Hz (+6 c) ok
+  G7   v 20 c7-soft     rate 1.4983 expect  3135.96 Hz measured  3144.03 Hz (+4.4 c) ok
+  G7   v110 c7-hard     rate 1.4983 expect  3135.96 Hz measured   3152.6 Hz (+9.2 c) ok
+  worst error: 9.2 cents (tolerance 12)
+
+Loop seams
+  c2-soft   ok   wrap step 1.00x the local step; RMS drift 0.8%
+  c2-hard   ok   wrap step 0.99x the local step; RMS drift 6.1%
+  c3-soft   ok   wrap step 0.82x the local step; RMS drift 6.0%
+  c3-hard   ok   wrap step 0.89x the local step; RMS drift 5.9%
+  c4-soft   ok   wrap step 0.95x the local step; RMS drift 3.9%
+  c4-hard   ok   wrap step 0.67x the local step; RMS drift 3.7%
+  c5-soft   ok   wrap step 1.00x the local step; RMS drift 3.5%
+  c5-hard   ok   wrap step 0.47x the local step; RMS drift 3.3%
+  c6-soft   ok   wrap step 0.39x the local step; RMS drift 4.0%
+  c6-hard   ok   wrap step 0.78x the local step; RMS drift 3.6%
+  c7-soft   ok   wrap step 0.89x the local step; RMS drift 0.4%
+  c7-hard   ok   wrap step 0.65x the local step; RMS drift 0.8%
+  click scan: no isolated jumps above 40x the median step during a 4.4 s sustain
+
+Voices
+  12-note chord: ok {"maxActive":12}
+  20 rapid repeats of C5: ok {"maxActive":5,"samples":["c5-hard"]}
+  steal beyond cap 24: ok {"maxActive":24,"steals":8}
+
+Cache
+  budget smaller than one sample: ok [CACHE_TOO_SMALL]
+  LRU eviction under budget: ok
+  pinned sample protection: ok [CACHE_PINNED_FULL]
+  voice holds pin while sounding: ok
+  policy: LRU eviction of unpinned entries only; samples held by active voices (including steal tails) are never unloaded; an over-budget request fails with CACHE_PINNED_FULL rather than dropping audio
+
+RESULT: PASS 
