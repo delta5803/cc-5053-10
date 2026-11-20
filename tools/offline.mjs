@@ -273,6 +273,275 @@ const report = {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Pedal retrigger: soft attack then hard attack on one pitch, key-up,
+// pedal-up, and a late old-sample read callback. The old release must end only
+// its own key instance; the pedal must own the released sounds as a set; the
+// retriggered sound must survive. Read heads are aligned with the cache-unpin
+// moments so a fix for one voice cannot free a buffer another still reads.
+// ---------------------------------------------------------------------------
+{
+  const softNote = 60;
+  const softVel = 40;
+  const hardVel = 110;
+  const softSel = selectSample(instrument, softNote, softVel);
+  const hardSel = selectSample(instrument, softNote, hardVel);
+  // Two visibly different recordings: the same pitch, different velocity
+  // layers. Confirm they really are distinct buffers and different levels.
+  const softBuf = pcmByKey.get(softSel.entries[0].sample.name);
+  const hardBuf = pcmByKey.get(hardSel.entries[0].sample.name);
+  const softRms = rmsOf(softBuf);
+  const hardRms = rmsOf(hardBuf);
+  // 180 ms key-up gap, pedal raised after the key-up, then a late callback.
+  const tOn1 = 0.05;
+  const tOn2 = 0.28;
+  const tOff1 = 0.34; // first key released, pedal still down
+  const tPedalUp = 0.55;
+  const tLate = 0.80; // old sample's released read head would have ended here
+  const events = [
+    { type: 'pedal', down: true, time: 0.02 },
+    { type: 'on', note: softNote, velocity: softVel, time: tOn1, tag: 'soft-hit' },
+    { type: 'on', note: softNote, velocity: hardVel, time: tOn2, tag: 'hard-hit' },
+    { type: 'off', note: softNote, time: tOff1, tag: 'soft-hit' },
+    { type: 'pedal', down: false, time: tPedalUp },
+    { type: 'off', note: softNote, time: tLate, tag: 'hard-hit' },
+  ];
+  const r = render(events, 2.4);
+  const ons = r.voiceLog.filter((l) => l.kind === 'noteOn');
+  const softOn = ons.find((l) => l.tag === 'soft-hit');
+  const hardOn = ons.find((l) => l.tag === 'hard-hit');
+  // The two attacks must use different, audibly different recordings.
+  const distinctSamples = softSel.entries[0].sample.name !== hardSel.entries[0].sample.name;
+  const levelDifference = Math.abs(20 * Math.log10(hardRms / Math.max(softRms, 1e-9)));
+  // Each attack is a separate key instance with its own head and its own voice.
+  const instancesDistinct = !!softOn && !!hardOn && softOn.id !== hardOn.id && softOn.instance !== hardOn.instance;
+  const headsDistinct = !!softOn && !!hardOn && softOn.head !== hardOn.head;
+  // The first (soft) instance must go to the pedal, not fade, while the second
+  // (hard) instance is still held, then still sound until pedal-up.
+  const softPedalHold = r.voiceLog.some((l) => l.kind === 'pedalHold' && l.id === softOn?.id);
+  const softPedalRelease = r.voiceLog.some((l) => l.kind === 'pedalUpRelease' && l.id === softOn?.id);
+  // The second sound is never terminated by the first key's release: the first
+  // instance's note-off is a pedal hold, and the hard instance stays held until
+  // its own key-up much later.
+  const hardGotNoteOffBeforeItsOwnKeyUp = r.voiceLog.some(
+    (l) => l.kind === 'noteOff' && l.id === hardOn?.id && l.time < tLate - 1e-6,
+  );
+  const hardStillSoundingAtOldTail = headActiveAt(r.heads, hardOn?.head, tLate - 0.02);
+  // Measure each attack and each release tail directly in the mix around its
+  // own onset, so the two sounds are separated in the final output.
+  const attack1 = windowPeak(r.pcm, sr, tOn1, 0.06);
+  const attack2 = windowPeak(r.pcm, sr, tOn2, 0.06);
+  const tailSoft = windowPeak(r.pcm, sr, tPedalUp + 0.02, cfgRelease(instrument));
+  const tailHard = windowPeak(r.pcm, sr, tLate + 0.02, cfgRelease(instrument));
+  const bothAttacksAudible = attack1 > 0.01 && attack2 > 0.01;
+  const softTailAudible = tailSoft > 0.005;
+  const hardTailAudible = tailHard > 0.005;
+  // "Clearly different" samples: different recordings *and* an audibly
+  // different attack level in the final mix.
+  const attackLevelDb = Math.abs(20 * Math.log10(attack2 / Math.max(attack1, 1e-9)));
+  // Read heads: the soft head must be released at pedal-up, not at the key-up
+  // (which is earlier) and not before the hard head's attack begins.
+  const softHead = r.heads.find((h) => h.head === softOn?.head);
+  const hardHead = r.heads.find((h) => h.head === hardOn?.head);
+  const softReleasedAtPedal = softHead && Math.abs((softHead.releaseAt ?? -1) - tPedalUp) < 0.02;
+  const headsOverlap = softHead && hardHead && softHead.end >= hardHead.start;
+  // Cache ownership: unpinning the soft buffer at pedal-up+release must not
+  // drop the hard voice's pin (two different recordings here, so both are
+  // resident; the important part is refcounts returning to zero only at the
+  // end). Capture the pin count of each recording while both sound.
+  const cachePinsWhileBoth = cachePinsAt(r, [tOn2 + 0.05], [
+    softSel.entries[0].sample.name,
+    hardSel.entries[0].sample.name,
+  ]);
+  const pinsOk = cachePinsWhileBoth.every((p) => p.pins === 1 && p.headsAlive === 1);
+  const unpinAuditSoftHard = unpinAudit(r, [
+    softSel.entries[0].sample.name,
+    hardSel.entries[0].sample.name,
+  ]);
+  const noPrematureFree = unpinAuditSoftHard.every((u) => !u.prematureFree);
+
+  report.pedalRetrigger = {
+    scenario: 'soft attack, then hard attack on the same pitch, key-up, pedal-up, late old read callback',
+    schedule: { tOn1, tOn2, tOff1, tPedalUp, tLate },
+    samples: {
+      soft: { name: softSel.entries[0].sample.name, velocity: softVel, rms: +softRms.toFixed(4) },
+      hard: { name: hardSel.entries[0].sample.name, velocity: hardVel, rms: +hardRms.toFixed(4) },
+      distinctSamples,
+      levelDifferenceDb: +levelDifference.toFixed(1),
+      attackLevelDifferenceDb: +attackLevelDb.toFixed(1),
+      distinct: distinctSamples && attackLevelDb > 3,
+    },
+    instances: {
+      soft: softOn ? { id: softOn.id, instance: softOn.instance, head: softOn.head } : null,
+      hard: hardOn ? { id: hardOn.id, instance: hardOn.instance, head: hardOn.head } : null,
+      distinctInstances: instancesDistinct,
+      distinctHeads: headsDistinct,
+    },
+    ownership: {
+      softHeldByPedalAfterKeyUp: softPedalHold,
+      softReleasedOnPedalUp: softPedalRelease,
+      hardNotReleasedByFirstKeyUp: !hardGotNoteOffBeforeItsOwnKeyUp,
+      hardStillSoundingBeforeLateCallback: hardStillSoundingAtOldTail,
+      rule: 'note-off follows the key instance; the pedal owns the set of already-released instances',
+    },
+    mix: {
+      attack1Peak: +attack1.toFixed(4),
+      attack2Peak: +attack2.toFixed(4),
+      softTailPeak: +tailSoft.toFixed(4),
+      hardTailPeak: +tailHard.toFixed(4),
+      bothAttacksAudible,
+      softTailAudible,
+      hardTailAudible,
+    },
+    readHeads: {
+      soft: softHead ? { releaseAt: round4(softHead.releaseAt), end: round4(softHead.end), reason: softHead.releaseReason } : null,
+      hard: hardHead ? { releaseAt: round4(hardHead.releaseAt), end: round4(hardHead.end), reason: hardHead.releaseReason } : null,
+      softReleasedAtPedalUp: !!softReleasedAtPedal,
+      headsOverlap: !!headsOverlap,
+    },
+    cache: {
+      pinsWhileBothSound: cachePinsWhileBoth,
+      unpinAudit: unpinAuditSoftHard,
+      refsReturnToZero: pinsOk,
+      noPrematureFree,
+    },
+    ok:
+      distinctSamples && attackLevelDb > 3 &&
+      instancesDistinct && headsDistinct &&
+      softPedalHold && softPedalRelease && !hardGotNoteOffBeforeItsOwnKeyUp &&
+      hardStillSoundingAtOldTail &&
+      bothAttacksAudible && softTailAudible && hardTailAudible &&
+      !!softReleasedAtPedal && !!headsOverlap &&
+      pinsOk && noPrematureFree,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 5c. One free voice: the same reprise must either steal the old pedal tail
+// (interrupt it) or let it finish naturally, and in both cases the two sample
+// read heads must be handed back to the cache at moments matching the actual
+// overlap, without freeing a recording still in use.
+// ---------------------------------------------------------------------------
+{
+  const note = 60;
+  const cases = [];
+
+  // (a) Only one free voice, the old pedal tail is interrupted by the new
+  // attack: the new sound must win, the old head must fade within the steal
+  // tail, and each recording must be pinned exactly once while it sounds.
+  {
+    const events = [
+      { type: 'pedal', down: true, time: 0.02 },
+      { type: 'on', note, velocity: 40, time: 0.05, tag: 'old-soft' },
+      { type: 'off', note, time: 0.20, tag: 'old-soft' },
+      { type: 'on', note, velocity: 110, time: 0.30, tag: 'new-hard' },
+      { type: 'pedal', down: false, time: 0.60 },
+      { type: 'off', note, time: 0.75, tag: 'new-hard' },
+    ];
+    const rr = new OfflineRenderer(instrument, pcmByKey, { maxVoices: 1 }).render(events, { seconds: 1.6 });
+    const steal = rr.voiceLog.find((l) => l.kind === 'steal');
+    const newOn = rr.voiceLog.find((l) => l.kind === 'noteOn' && l.tag === 'new-hard');
+    const newAlive = headActiveAt(rr.heads, newOn?.head, 0.32);
+    const stealTailSec = instrument.cfg.stealReleaseMs / 1000;
+    const oldInterrupted = rr.heads.some((h) => h.stolenAt !== null);
+    const oldHeadEndedSoon = rr.heads.some((h) => h.stolenAt !== null && h.end - h.stolenAt <= stealTailSec + 0.01);
+    const bothRecordingsPinnedOnce = cachePinsAt(rr, [0.34], [
+      selectSample(instrument, note, 40).entries[0].sample.name,
+      selectSample(instrument, note, 110).entries[0].sample.name,
+    ]);
+    // With one voice the old head is faded by the steal; after the fade only
+    // the new recording may remain pinned, and the old one must be released
+    // exactly when its head ends (not before).
+    const oldKey = selectSample(instrument, note, 40).entries[0].sample.name;
+    const newKey = selectSample(instrument, note, 110).entries[0].sample.name;
+    const afterFade = cachePinsAt(rr, [0.36], [oldKey, newKey]);
+    const oldRefReleasedAfterFade = afterFade.find((p) => p.key === oldKey)?.pins === 0;
+    const newStillPinned = afterFade.find((p) => p.key === newKey)?.pins === 1;
+    const audit = unpinAudit(rr, [oldKey, newKey]);
+    const noPrematureFree = audit.every((u) => !u.prematureFree);
+    cases.push({
+      name: 'one free voice: new attack steals the old pedal tail',
+      maxVoices: 1,
+      maxActive: rr.maxActive,
+      maxAudible: rr.maxAudible,
+      steals: rr.voiceManager.steals,
+      oldTailInterrupted: oldInterrupted,
+      oldTailFadeSeconds: oldHeadEndedSoon ? +(stealTailSec).toFixed(3) : null,
+      newSoundSurvives: !!newAlive,
+      pinsWhileBothSound: bothRecordingsPinnedOnce,
+      pinsAfterStealFade: afterFade,
+      oldRefReleasedAfterFade,
+      newStillPinned,
+      unpinAudit: audit,
+      headTrace: rr.heads.map((h) => ({
+        head: h.head, voiceId: h.voiceId, note: h.note, velocity: h.velocity,
+        start: round4(h.start), releaseAt: round4(h.releaseAt), stolenAt: round4(h.stolenAt), end: round4(h.end),
+      })),
+      ok:
+        rr.maxActive === 1 && !!steal && !!newAlive && oldInterrupted && oldHeadEndedSoon &&
+        oldRefReleasedAfterFade && newStillPinned && noPrematureFree,
+    });
+  }
+
+  // (b) Only one free voice, but the new attack comes after the old pedal tail
+  // has naturally finished: no steal is needed and the old recording may be
+  // reused for the new sound without either read head being freed early.
+  {
+    const releaseSec = instrument.cfg.releaseMs / 1000;
+    const tOff = 0.20;
+    const tPedalUp = 0.30;
+    const oldDone = tPedalUp + releaseSec + 0.02;
+    const tNew = oldDone + 0.05;
+    const events = [
+      { type: 'pedal', down: true, time: 0.02 },
+      { type: 'on', note, velocity: 40, time: 0.05, tag: 'old-soft' },
+      { type: 'off', note, time: tOff, tag: 'old-soft' },
+      { type: 'pedal', down: false, time: tPedalUp },
+      { type: 'on', note, velocity: 110, time: tNew, tag: 'new-hard' },
+      { type: 'off', note, time: tNew + 0.25, tag: 'new-hard' },
+    ];
+    const rr = new OfflineRenderer(instrument, pcmByKey, { maxVoices: 1 }).render(events, { seconds: 1.6 });
+    const ons = rr.voiceLog.filter((l) => l.kind === 'noteOn');
+    const steals = rr.voiceManager.steals;
+    const oldHead = rr.heads.find((h) => h.velocity === 40);
+    const newHead = rr.heads.find((h) => h.velocity === 110);
+    const oldFinishedFirst = oldHead && newHead && oldHead.end <= newHead.start + 1e-6;
+    const noSteal = steals === 0;
+    // Both heads get their own pin and hand it back once; since the soft and
+    // hard recordings differ, sharing is not required, but refcounts must hit
+    // zero only after each head ends.
+    const finalPins = [selectSample(instrument, note, 40).entries[0].sample.name,
+      selectSample(instrument, note, 110).entries[0].sample.name]
+      .map((k) => ({ key: k, pins: rr.cache.entries.get(k)?.pins ?? 0 }));
+    const refsCleared = finalPins.every((p) => p.pins === 0);
+    const audit = unpinAudit(rr, finalPins.map((p) => p.key));
+    const noPrematureFree = audit.every((u) => !u.prematureFree);
+    cases.push({
+      name: 'one free voice: old pedal tail finishes naturally first',
+      maxVoices: 1,
+      maxActive: rr.maxActive,
+      steals,
+      oldHeadEndsBeforeNewStarts: !!oldFinishedFirst,
+      pinsAtEnd: finalPins,
+      refsCleared,
+      unpinAudit: audit,
+      headTrace: rr.heads.map((h) => ({
+        head: h.head, voiceId: h.voiceId, note: h.note, velocity: h.velocity,
+        start: round4(h.start), releaseAt: round4(h.releaseAt), stolenAt: round4(h.stolenAt), end: round4(h.end),
+      })),
+      ok: ons.length === 2 && noSteal && rr.maxActive === 1 && !!oldFinishedFirst && refsCleared && noPrematureFree,
+    });
+  }
+
+  report.pedalOneFreeVoice = {
+    cases,
+    allOk: cases.every((c) => c.ok),
+    note:
+      'with one free voice the reprise either steals the pedal-held tail (8 ms fade) or waits for it to end; ' +
+      'read-head unpins match the actual overlap and never free a recording another head is reading',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 6. Cache bounds and pin protection
 // ---------------------------------------------------------------------------
 {
@@ -411,6 +680,8 @@ const failures = [];
 if (!report.pitch.allWithin12Cents) failures.push('pitch');
 if (!report.loops.allOk) failures.push('loops');
 if (!report.voices.allOk) failures.push('voices');
+if (!report.pedalRetrigger.ok) failures.push('pedal-retrigger');
+if (!report.pedalOneFreeVoice.allOk) failures.push('pedal-one-free-voice');
 if (!report.cache.allOk) failures.push('cache');
 if (!report.determinism.sameInputSameSamples) failures.push('determinism');
 if (!report.velocity.sweep.monotoneNonDecreasing) failures.push('velocity-monotonicity');
@@ -427,6 +698,82 @@ process.exit(report.pass ? 0 : 1);
 // ---------------------------------------------------------------------------
 function renderSingle(note, velocity, seconds, _unused) {
   return render([{ type: 'on', note, velocity, time: 0.02 }, { type: 'off', note, time: seconds - 0.02 }], seconds);
+}
+
+// Whether a read head is still advancing at time t.
+function headActiveAt(heads, headId, t) {
+  if (headId === undefined || headId === null) return false;
+  const h = heads.find((x) => x.head === headId);
+  return !!h && h.start <= t && t <= h.end;
+}
+
+// Peak magnitude in [fromTime, fromTime + durSec), measured on the final mix.
+function windowPeak(pcm, sampleRate, fromTime, durSec) {
+  const a = Math.max(0, Math.floor(fromTime * sampleRate));
+  const b = Math.min(pcm.length, Math.floor((fromTime + durSec) * sampleRate));
+  let peak = 0;
+  for (let i = a; i < b; i++) peak = Math.max(peak, Math.abs(pcm[i]));
+  return peak;
+}
+
+function cfgRelease(instrument) {
+  return instrument.cfg.releaseMs / 1000;
+}
+
+function rmsOf(pcm) {
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+  return Math.sqrt(sum / Math.max(1, pcm.length));
+}
+
+// Reconstruct the cache refcount for each key at a given time from the pin
+// trace. This is the real ownership: it is the number of live pins the cache
+// holds, not the number of voices we think should be using the buffer.
+function cachePinsAt(rendered, times, keys) {
+  const trace = rendered.pinTrace ?? [];
+  const snapshots = times.map((t) => {
+    return keys.map((key) => {
+      let pins = 0;
+      for (const e of trace) {
+        if (e.time > t + 1e-9) break;
+        if (e.key === key) pins = e.pins;
+      }
+      const covering = (rendered.heads ?? []).filter(
+        (h) => h.layer.split('+').includes(key) && h.start <= t + 1e-9 && t < h.end + 1e-9,
+      );
+      return { key, pins, headsAlive: covering.length, at: +t.toFixed(3) };
+    });
+  });
+  return snapshots[0] ?? keys.map((key) => ({ key, pins: 0, headsAlive: 0 }));
+}
+
+// The moment the cache refcount of a key first reaches zero, and whether any
+// read head using that key was still alive then (which would be a premature
+// free).
+function unpinAudit(rendered, keys) {
+  const trace = rendered.pinTrace ?? [];
+  return keys.map((key) => {
+    const events = trace.filter((e) => e.key === key);
+    const zero = events.find((e) => e.pins === 0);
+    const zeroTime = zero ? zero.time : null;
+    const heads = rendered.heads ?? [];
+    // Any head that starts before the refcount hits zero and ends after it is
+    // being read at the instant the buffer was released.
+    const premature = zeroTime === null ? false : heads.some(
+      (h) => h.layer.split('+').includes(key) && h.start < zeroTime - 1e-9 && h.end > zeroTime + 1e-9,
+    );
+    return {
+      key,
+      firstZeroAt: zeroTime,
+      maxPins: events.reduce((m, e) => Math.max(m, e.pins), 0),
+      pinEvents: events.length,
+      prematureFree: premature,
+    };
+  });
+}
+
+function round4(v) {
+  return v === null || v === undefined ? null : +Number(v).toFixed(4);
 }
 
 function renderHeldRoot(rootMidi, velocity, seconds) {
@@ -542,6 +889,26 @@ function textSummary(rep) {
   L.push('Voices');
   for (const c of rep.voices.cases) {
     L.push(`  ${c.name}: ${c.ok ? 'ok' : 'FAIL'} ${JSON.stringify({ maxActive: c.measuredMaxActive ?? c.maxActive, steals: c.steals, samples: c.samplesUsed })}`);
+  }
+  L.push('');
+  L.push('Pedal retrigger (soft then hard on one pitch)');
+  {
+    const p = rep.pedalRetrigger;
+    L.push(`  samples: soft ${p.samples.soft.name} (rms ${p.samples.soft.rms}) vs hard ${p.samples.hard.name} ` +
+      `(rms ${p.samples.hard.rms}), ${p.samples.levelDifferenceDb} dB apart, distinct=${p.samples.distinct}`);
+    L.push(`  instances: ${JSON.stringify(p.instances)}`);
+    L.push(`  ownership: ${JSON.stringify(p.ownership)}`);
+    L.push(`  mix: ${JSON.stringify(p.mix)}`);
+    L.push(`  read heads: ${JSON.stringify(p.readHeads)}`);
+    L.push(`  cache: ${JSON.stringify(p.cache)}`);
+    L.push(`  ${p.ok ? 'ok' : 'FAIL'}`);
+  }
+  L.push('');
+  L.push('Pedal with one free voice');
+  for (const c of rep.pedalOneFreeVoice.cases) {
+    L.push(`  ${c.name}: ${c.ok ? 'ok' : 'FAIL'} ${JSON.stringify({ maxActive: c.maxActive, steals: c.steals })}`);
+    L.push(`    heads: ${JSON.stringify(c.headTrace)}`);
+    L.push(`    unpin: ${JSON.stringify(c.unpinAudit)}`);
   }
   L.push('');
   L.push('Cache');

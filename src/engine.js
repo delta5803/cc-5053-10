@@ -369,10 +369,17 @@ export function residentBytes(instrument) {
 // Voice manager
 // ---------------------------------------------------------------------------
 
-// Voice lifecycle: held -> release -> finished. Stealing a voice when the cap
-// is reached removes it from the logical count immediately but keeps its cache
-// pins until a short fade tail ends, so the buffer can never be unloaded while
-// still audible.
+// Voice lifecycle: held -> (sustained) -> release -> finished. A voice is a
+// key *instance*: its identity is its id, never its note. Releasing a key must
+// only ever touch the instance that key created, otherwise a retrigger of the
+// same pitch (soft then hard, or repeated) would silence the newer voice.
+//
+// The sustain pedal owns the sounds of keys that have already been let go, as
+// a set of voice instances. A pedal-held voice leaves `sustained` only when the
+// pedal rises, and a key that is still physically down at pedal-up stays held.
+// Stealing a voice when the cap is reached removes it from the logical count
+// immediately but keeps its cache pins until a short fade tail ends, so the
+// buffer can never be unloaded while still audible.
 export class VoiceManager {
   constructor(instrument, cache, options = {}) {
     this.instrument = instrument;
@@ -383,14 +390,22 @@ export class VoiceManager {
     this.voices = new Map();
     this.tails = new Map();
     this.nextId = 1;
+    this.nextHead = 1;
     this.order = 0;
     this.steals = 0;
     this.rejections = 0;
+    this.pedal = false;
     this.log = [];
   }
 
   activeCount() {
     return this.voices.size;
+  }
+
+  sustainedCount() {
+    let n = 0;
+    for (const v of this.voices.values()) if (v.state === 'sustained') n++;
+    return n;
   }
 
   audibleCount() {
@@ -401,14 +416,18 @@ export class VoiceManager {
     this.log.push({
       kind,
       id: voice.id,
+      instance: voice.instance ?? voice.id,
+      head: voice.headId,
       note: voice.note,
       noteName: noteName(voice.note),
       velocity: voice.velocity,
+      tag: voice.tag ?? null,
       zone: voice.plan.zone.rootMidi,
       samples: voice.plan.entries.map((e) => e.sample.name),
       layers: voice.plan.entries.map((e) => e.layer),
       rate: voice.plan.rate,
       state: voice.state,
+      pedal: this.pedal,
       time: +Number(time).toFixed(6),
       active: this.voices.size,
       audible: this.audibleCount(),
@@ -438,10 +457,15 @@ export class VoiceManager {
 
   _chooseVictim() {
     let releasing = null;
+    let sustained = null;
     for (const v of this.voices.values()) {
       if (v.state === 'release' && (!releasing || v.order < releasing.order)) releasing = v;
+      if (v.state === 'sustained' && (!sustained || v.order < sustained.order)) sustained = v;
     }
+    // A pedal-held instance is already let go by its key, so it is a safer
+    // victim than a key the player is still holding.
     if (releasing) return { voice: releasing, reason: 'releasing-oldest' };
+    if (sustained) return { voice: sustained, reason: 'sustained-oldest' };
     let oldest = null;
     for (const v of this.voices.values()) if (!oldest || v.order < oldest.order) oldest = v;
     return { voice: oldest, reason: 'oldest-held' };
@@ -469,33 +493,91 @@ export class VoiceManager {
       });
       this._record('steal', victim, time, { reason: stealReason, byNote: note, byId: this.nextId });
     }
+    const id = this.nextId++;
     const voice = {
-      id: this.nextId++,
+      id,
+      instance: id,
       note,
       velocity,
       plan: resolved,
       keys,
       tag,
       state: 'held',
+      keyDown: true,
       startTime: time,
       releaseTime: null,
+      finishTime: null,
       releaseReason: null,
+      pedalAtRelease: false,
       order: ++this.order,
+      headId: this.nextHead++,
     };
     this.voices.set(voice.id, voice);
     this._record('noteOn', voice, time, victim ? { stolenId: victim.id } : {});
     return { voice, stolen: victim ? { id: victim.id, note: victim.note, reason: stealReason } : null, plan: resolved };
   }
 
+  // Release a single key instance. This is the only correct way to end a
+  // pressed note: releasing by note would also catch a newer retrigger of the
+  // same pitch (the "old release kills the second sound" bug), and would leave
+  // the old key's instance in the pedal-held set by mistake.
+  //
+  // With the pedal down a released key's voice is not faded: it moves to the
+  // pedal-owned `sustained` set and keeps sounding until pedal-up. Without the
+  // pedal it fades immediately.
+  noteOffVoice(voiceOrId, time, reason = 'noteOff') {
+    const id = typeof voiceOrId === 'object' ? voiceOrId.id : voiceOrId;
+    const v = this.voices.get(id);
+    if (!v || v.state !== 'held') return false;
+    v.keyDown = false;
+    v.releaseTime = time;
+    if (this.pedal) {
+      v.state = 'sustained';
+      v.releaseReason = `pedal:${reason}`;
+      v.pedalAtRelease = true;
+      this._record('pedalHold', v, time, { reason });
+    } else {
+      v.state = 'release';
+      v.releaseReason = reason;
+      this._record('noteOff', v, time);
+    }
+    return true;
+  }
+
+  // Released-by-key lookup for callers that only know the pitch (the UI's
+  // note-based test hooks). Always pick the newest instance still relevant so
+  // a repeated press releases its own attack, not an older one.
   noteOff(note, time, tag = null) {
+    let target = null;
+    for (const v of this.voices.values()) {
+      if (v.note !== note || !v.keyDown) continue;
+      if (tag !== null && v.tag !== tag) continue;
+      if (!target || v.order > target.order) target = v;
+    }
+    if (!target) return 0;
+    return this.noteOffVoice(target, time, 'noteOff') ? 1 : 0;
+  }
+
+  pedalDown(time) {
+    if (this.pedal) return 0;
+    this.pedal = true;
+    this._record('pedalDown', { id: 0, note: 0, velocity: 0, state: 'pedal', plan: { zone: { rootMidi: 0 }, entries: [], rate: 0 } }, time);
+    return this.sustainedCount();
+  }
+
+  // Raising the pedal ends every pedal-owned instance. Keys physically down at
+  // this moment are not pedal-owned: they were never let go, so they keep
+  // sounding and only release on their own note-off.
+  pedalUp(time) {
+    if (!this.pedal) return 0;
+    this.pedal = false;
     let count = 0;
     for (const v of [...this.voices.values()]) {
-      if (v.note !== note || v.state !== 'held') continue;
-      if (tag !== null && v.tag !== tag) continue;
+      if (v.state !== 'sustained') continue;
       v.state = 'release';
       v.releaseTime = time;
-      v.releaseReason = 'noteOff';
-      this._record('noteOff', v, time);
+      v.releaseReason = 'pedalUp';
+      this._record('pedalUpRelease', v, time);
       count++;
     }
     return count;
@@ -506,7 +588,7 @@ export class VoiceManager {
   tick(now) {
     for (const v of [...this.voices.values()]) {
       if (v.state !== 'release') continue;
-      if (now - v.releaseTime >= this.cfg.releaseMs / 1000 - 1e-6) this._finish(v);
+      if (now - v.releaseTime >= this.cfg.releaseMs / 1000 - 1e-6) this._finish(v, now);
     }
     for (const [id, tail] of [...this.tails]) {
       if (now >= tail.endTime - 1e-6) {
@@ -517,11 +599,12 @@ export class VoiceManager {
     }
   }
 
-  _finish(voice) {
+  _finish(voice, now = voice.releaseTime ?? voice.startTime) {
     if (!this.voices.has(voice.id)) return false;
     this.voices.delete(voice.id);
+    voice.finishTime = now;
     for (const key of voice.keys) this.cache.unpin(key);
-    this._record('finished', voice, voice.releaseTime ?? voice.startTime);
+    this._record('finished', voice, now);
     return true;
   }
 
@@ -529,6 +612,8 @@ export class VoiceManager {
     return {
       maxVoices: this.cfg.maxVoices,
       activeCount: this.voices.size,
+      sustainedCount: this.sustainedCount(),
+      pedal: this.pedal,
       tailCount: this.tails.size,
       audibleCount: this.audibleCount(),
       steals: this.steals,
@@ -537,10 +622,14 @@ export class VoiceManager {
         .sort((a, b) => a.order - b.order)
         .map((v) => ({
           id: v.id,
+          instance: v.instance,
+          head: v.headId,
           note: v.note,
           noteName: noteName(v.note),
           velocity: v.velocity,
           state: v.state,
+          keyDown: v.keyDown,
+          pedalHeld: v.state === 'sustained',
           zoneRoot: v.plan.zone.rootMidi,
           zoneRange: [v.plan.zone.lo, v.plan.zone.hi],
           rate: v.plan.rate,
@@ -720,7 +809,25 @@ export class OfflineRenderer {
     this.instrument = instrument;
     this.pcmByKey = pcmByKey;
     this.sr = options.sampleRate ?? instrument.manifest.sampleRate ?? 32000;
-    this.cache = new SampleCache(instrument, { cacheBytes: options.cacheBytes });
+    this._now = 0;
+    // Every pin/unpin is stamped with the current render time so the report can
+    // align the moment a read head is handed back to the cache with the actual
+    // overlap of the voices, and prove a still-used recording is never freed.
+    this.pinTrace = [];
+    this.cache = new SampleCache(instrument, {
+      cacheBytes: options.cacheBytes,
+      onEvent: (e) => {
+        if (e.type === 'pin' || e.type === 'unpin') {
+          this.pinTrace.push({
+            time: +this._now.toFixed(6),
+            type: e.type,
+            key: e.key,
+            pins: e.pins,
+            refs: this.cache.refs(e.key),
+          });
+        }
+      },
+    });
     this.vm = new VoiceManager(instrument, this.cache, { maxVoices: options.maxVoices });
     this.pcmCache = new Map();
     for (const z of instrument.zones) {
@@ -742,6 +849,12 @@ export class OfflineRenderer {
     let next = 0;
     const runtimes = new Map();
     const tails = new Map();
+    // Per-read-head trace: when each sample read head started, when it was
+    // repointed at pedal release, when it was retired, and which voice owned
+    // it. This lets the offline report align the moments two heads are handed
+    // back to the cache with the actual overlap, so a fix for one voice can
+    // never free a recording another voice is still reading.
+    const heads = new Map();
     let maxActive = 0;
     let maxAudible = 0;
     const cfg = this.vm.cfg;
@@ -751,6 +864,7 @@ export class OfflineRenderer {
 
     for (let frame = 0; frame < frames; frame++) {
       const t = frame / sr;
+      this._now = t;
       this.vm.tick(t);
       while (next < evs.length && evs[next].time <= t + 1e-9) {
         const ev = evs[next++];
@@ -761,6 +875,8 @@ export class OfflineRenderer {
             if (oldRt) {
               runtimes.delete(res.stolen.id);
               tails.set(res.stolen.id, { rt: oldRt, from: t, sec: tailSec });
+              const h = heads.get(res.stolen.id);
+              if (h) h.stolenAt = t;
             }
           }
           runtimes.set(res.voice.id, {
@@ -769,17 +885,40 @@ export class OfflineRenderer {
             env: 0,
             releaseFrom: null,
           });
+          heads.set(res.voice.id, {
+            head: res.voice.headId,
+            voiceId: res.voice.id,
+            instance: res.voice.instance,
+            note: res.voice.note,
+            velocity: res.voice.velocity,
+            tag: res.voice.tag ?? null,
+            layer: res.voice.plan.entries.map((e) => e.sample.name).join('+'),
+            start: t,
+            releaseAt: null,
+            stolenAt: null,
+            end: null,
+            releaseReason: null,
+          });
         } else if (ev.type === 'off') {
           this.vm.noteOff(ev.note, t, ev.tag ?? null);
+        } else if (ev.type === 'pedal') {
+          if (ev.down) this.vm.pedalDown(t);
+          else this.vm.pedalUp(t);
         }
       }
       let mixFrame = 0;
       for (const rt of [...runtimes.values()]) {
         const v = rt.voice;
-        if (v.state === 'release' && rt.releaseFrom === null) rt.releaseFrom = v.releaseTime;
+        if (v.state === 'release' && rt.releaseFrom === null) {
+          rt.releaseFrom = v.releaseTime;
+          const h = heads.get(v.id);
+          if (h) { h.releaseAt = v.releaseTime; h.releaseReason = v.releaseReason; }
+        }
         if (v.state === 'release' && t - rt.releaseFrom >= releaseSec - 1e-9) {
           runtimes.delete(v.id);
-          this.vm._finish(v);
+          this.vm._finish(v, rt.releaseFrom + releaseSec);
+          const h = heads.get(v.id);
+          if (h) h.end = rt.releaseFrom + releaseSec;
           continue;
         }
         let s = 0;
@@ -803,6 +942,8 @@ export class OfflineRenderer {
         if (elapsed >= tail.sec) {
           tails.delete(id);
           this.vm.tails.delete(id);
+          const h = heads.get(id);
+          if (h) h.end = tail.from + tail.sec;
           continue;
         }
         const rt = tail.rt;
@@ -823,6 +964,9 @@ export class OfflineRenderer {
       maxAudible = Math.max(maxAudible, runtimes.size + tails.size);
       out[frame] = Math.tanh(mixFrame * 1.1) / Math.tanh(1.1);
     }
+    // Any head still sounding at the end of the render is retired at the last
+    // frame so the trace covers the whole schedule.
+    for (const h of heads.values()) if (h.end === null) h.end = frames / sr;
     return {
       pcm: out,
       sampleRate: sr,
@@ -830,6 +974,8 @@ export class OfflineRenderer {
       maxActive,
       maxAudible,
       voiceLog: this.vm.log,
+      heads: [...heads.values()].sort((a, b) => a.head - b.head),
+      pinTrace: this.pinTrace,
       voiceManager: this.vm,
       cache: this.cache,
       cacheSnapshot: this.cache.snapshot(),

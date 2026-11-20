@@ -210,6 +210,35 @@ button.link { text-decoration: none; display: inline-flex; align-items: center; 
 }
 .key .zlabel { position: absolute; top: 9px; left: 0; right: 0; text-align: center; font-size: 8px; color: #9aa3b1; pointer-events: none; }
 
+.pedal-btn { align-self: end; padding: 7px 12px; display: inline-flex; gap: 8px; align-items: center; }
+.pedal-btn .pedal-state {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: #20262f; border: 1px solid #2c3441; color: #8a93a3;
+}
+.pedal-btn.engaged { border-color: rgba(111,179,255,0.6); color: var(--accent); box-shadow: 0 0 0 1px rgba(111,179,255,0.25) inset; }
+.pedal-btn.engaged .pedal-state { background: rgba(111,179,255,0.16); border-color: rgba(111,179,255,0.5); color: var(--accent); }
+
+.key-instances {
+  margin: 12px 0 2px; padding: 8px 10px; background: #10141a;
+  border: 1px solid var(--line); border-radius: 9px; font-size: 11.5px;
+}
+.ki-head, .ki-row {
+  display: grid; grid-template-columns: 46px 1.1fr 1.8fr 1fr 68px;
+  gap: 8px; align-items: baseline;
+}
+.ki-head { color: #5f6878; font-size: 10px; letter-spacing: 0.03em; padding: 0 0 5px; border-bottom: 1px solid #1c222b; }
+.ki-row { padding: 4px 0; border-bottom: 1px solid #171c23; color: #aab2bf; font-family: var(--mono); }
+.ki-row:last-child { border-bottom: none; }
+.ki-row.held .ki-s { color: var(--accent); }
+.ki-row.sustained .ki-s { color: var(--hard); }
+.ki-i { color: #6f7787; }
+.ki-n { color: var(--text); font-family: var(--mono); }
+.ki-l b { font-weight: 600; }
+.ki-l b.soft { color: var(--soft); }
+.ki-l b.hard { color: var(--hard); }
+.ki-l b.blend { color: #b9c6dd; }
+.ki-v { color: #8a93a3; }
+
 .keyhow { color: var(--muted); font-size: 11.5px; margin-top: 12px; line-height: 1.7; }
 .keyhow kbd {
   display: inline-block; padding: 0 5px; margin: 0 1px;

@@ -145,7 +145,6 @@ export class LiveEngine {
     }
     const voice = res.voice;
     const cfg = this.vm.cfg;
-
     const out = this.ctx.createGain();
     out.gain.value = 0;
     out.connect(this.master);
@@ -180,6 +179,8 @@ export class LiveEngine {
 
     const graph = {
       id: voice.id,
+      instance: voice.instance,
+      head: voice.headId,
       note,
       velocity,
       plan,
@@ -188,6 +189,7 @@ export class LiveEngine {
       sources,
       layerNodes,
       state: 'held',
+      pedalHeld: false,
       startWall: performance.now(),
       source,
       ended: false,
@@ -205,6 +207,9 @@ export class LiveEngine {
       rate: plan.rate,
       layers: plan.entries.map((e) => ({ layer: e.layer, sample: e.sample.name, gain: +e.gain.toFixed(4) })),
       mix: plan.mix.kind,
+      voiceId: voice.id,
+      instance: voice.instance,
+      head: voice.headId,
       audioTime: +t0.toFixed(4),
       wall: performance.now(),
       activeVoices: this.vm.activeCount(),
@@ -214,15 +219,76 @@ export class LiveEngine {
     return { plan, voice: this._voiceView(voice), audioTime: t0 };
   }
 
-  noteOff(note) {
+  // Release one key *instance*, never "every voice on this pitch". If the same
+  // pitch was retriggered while this key was down, the newer instance keeps
+  // sounding. `voiceId` comes from noteOn; a bare pitch falls back to the
+  // newest still-held instance of that pitch (test hooks and the UI's release
+  // path both know the note they pressed).
+  noteOff(note, voiceId = null) {
     if (!this.ctx) return 0;
     const now = this.ctx.currentTime;
-    const count = this.vm.noteOff(note, now);
+    let target = null;
+    if (voiceId !== null) {
+      // An explicit instance id is authoritative: if it has already finished,
+      // nothing is released. Falling back to another voice of the same pitch
+      // would let a stale key-up silence a newer press.
+      target = this.vm.voices.get(voiceId) ?? null;
+      if (!target || target.note !== note) return 0;
+    } else {
+      for (const v of this.vm.voices.values()) {
+        if (v.note !== note || !v.keyDown) continue;
+        if (!target || v.order > target.order) target = v;
+      }
+    }
+    if (!target) return 0;
+    this.vm.noteOffVoice(target, now, 'noteOff');
+    const g = this.graphs.get(target.id);
+    if (g) {
+      if (target.state === 'sustained') {
+        // Pedal owns this sound now: keep the graph running. The note's key is
+        // up, but the buffer keeps reading until pedal-up (or a steal).
+        g.state = 'sustained';
+        g.pedalHeld = true;
+      } else {
+        this._releaseGraph(g, now);
+      }
+    }
+    this._pushTick({
+      kind: 'noteOff',
+      voiceId: target.id,
+      instance: target.instance,
+      head: target.headId,
+      note,
+      noteName: noteName(note),
+      audioTime: +now.toFixed(4),
+      wall: performance.now(),
+      pedal: this.vm.pedal,
+      activeVoices: this.vm.activeCount(),
+    });
+    this.onEvent?.({ type: 'voices', snapshot: this.vm.snapshot() });
+    return 1;
+  }
+
+  pedalDown() {
+    if (!this.ctx) return 0;
+    this.vm.pedalDown(this.ctx.currentTime);
+    this._pushTick({ kind: 'pedalDown', note: 0, noteName: '—', audioTime: +this.ctx.currentTime.toFixed(4), wall: performance.now(), activeVoices: this.vm.activeCount() });
+    this.onEvent?.({ type: 'voices', snapshot: this.vm.snapshot() });
+    return this.vm.sustainedCount();
+  }
+
+  // Pedal-up releases every pedal-owned instance. A key still physically down
+  // is not pedal-owned, so it survives pedal-up and releases on its own key-up.
+  pedalUp() {
+    if (!this.ctx) return 0;
+    const now = this.ctx.currentTime;
+    const count = this.vm.pedalUp(now);
     for (const g of this.graphs.values()) {
-      if (g.note !== note || g.state !== 'held') continue;
+      if (!g.pedalHeld || g.state !== 'sustained') continue;
+      g.pedalHeld = false;
       this._releaseGraph(g, now);
     }
-    for (const t of this.ticks.slice(-count)) if (t.kind === 'noteOn') t.releasedAt = +now.toFixed(4);
+    this._pushTick({ kind: 'pedalUp', note: 0, noteName: '—', audioTime: +now.toFixed(4), wall: performance.now(), released: count, activeVoices: this.vm.activeCount() });
     this.onEvent?.({ type: 'voices', snapshot: this.vm.snapshot() });
     return count;
   }
@@ -242,6 +308,9 @@ export class LiveEngine {
     g.stopAt = now + rel + 0.02;
     this._pushTick({
       kind: 'noteOff',
+      voiceId: g.id,
+      instance: g.instance,
+      head: g.head,
       note: g.note,
       noteName: noteName(g.note),
       audioTime: +now.toFixed(4),
@@ -254,6 +323,7 @@ export class LiveEngine {
     if (g.state === 'stealing') return;
     const sec = Math.max(0.003, this.vm.cfg.stealReleaseMs / 1000);
     g.state = 'stealing';
+    g.pedalHeld = false;
     try { g.out.gain.cancelScheduledValues(now); } catch { /* noop */ }
     const current = Math.max(0.0001, g.out.gain.value);
     g.out.gain.setValueAtTime(current, now);
@@ -264,6 +334,9 @@ export class LiveEngine {
     g.stopAt = now + sec + 0.02;
     this._pushTick({
       kind: 'steal',
+      voiceId: g.id,
+      instance: g.instance,
+      head: g.head,
       note: g.note,
       noteName: noteName(g.note),
       audioTime: +now.toFixed(4),
@@ -275,6 +348,8 @@ export class LiveEngine {
   _voiceView(v) {
     return {
       id: v.id,
+      instance: v.instance,
+      head: v.headId,
       note: v.note,
       noteName: noteName(v.note),
       velocity: v.velocity,
@@ -291,7 +366,9 @@ export class LiveEngine {
         weight: e.layerWeight,
         loop: e.loop,
       })),
-      state: 'held',
+      state: v.state,
+      keyDown: v.keyDown,
+      pedalHeld: v.state === 'sustained',
       startTime: v.startTime,
     };
   }
@@ -307,14 +384,25 @@ export class LiveEngine {
   sweep() {
     if (!this.ctx) return null;
     const now = this.ctx.currentTime;
+    this.vm.tick(now);
+    // Retire graphs the voice manager has already finished (released voices and
+    // expired steal tails) so their sample read heads are handed back exactly
+    // once, at the same moment the cache pin is dropped.
     for (const [id, g] of [...this.graphs]) {
       if (g.stopAt !== undefined && now >= g.stopAt) {
         g.out.disconnect();
         for (const lg of g.layerNodes) lg.node.disconnect();
         this.graphs.delete(id);
+        continue;
+      }
+      if (!this.vm.voices.has(id) && !this.vm.tails.has(id)) {
+        try { g.out.gain.cancelScheduledValues(now); g.out.gain.setValueAtTime(0, now); } catch { /* noop */ }
+        for (const src of g.sources) { try { src.stop(now); } catch { /* already stopped */ } }
+        g.out.disconnect();
+        for (const lg of g.layerNodes) lg.node.disconnect();
+        this.graphs.delete(id);
       }
     }
-    this.vm.tick(now);
     const snap = this.vm.snapshot();
     const meters = this._meters();
     this.onEvent?.({ type: 'voices', snapshot: snap, meters });
@@ -323,10 +411,19 @@ export class LiveEngine {
 
   _meters() {
     let voices = 0;
-    for (const g of this.graphs.values()) if (g.state === 'held' || g.state === 'release' || g.state === 'stealing') voices++;
+    let held = 0;
+    let sustained = 0;
+    for (const g of this.graphs.values()) {
+      if (g.state === 'held' || g.state === 'release' || g.state === 'stealing' || g.state === 'sustained') voices++;
+      if (g.state === 'held') held++;
+      if (g.state === 'sustained') sustained++;
+    }
     return {
       graphVoices: voices,
       logicalVoices: this.vm.activeCount(),
+      heldVoices: held,
+      sustainedVoices: sustained,
+      pedal: this.vm.pedal,
       tails: this.vm.tails.size,
       cacheUsed: this.cache.usedBytes,
       cacheBudget: this.cache.budget,
@@ -383,11 +480,12 @@ export class LiveEngine {
       for (const src of g.sources) { try { src.stop(now); } catch { /* noop */ } }
       g.stopAt = now;
     }
-    for (const v of [...this.vm.voices.values()]) this.vm._finish(v);
+    for (const v of [...this.vm.voices.values()]) this.vm._finish(v, now);
     for (const [id, tail] of [...this.vm.tails]) {
       for (const key of tail.keys) this.cache.unpin(key);
       this.vm.tails.delete(id);
     }
+    this.vm.pedal = false;
     this.vm.steals = 0;
     this.vm.rejections = 0;
     this.ticks = [];

@@ -9,9 +9,14 @@ const $ = (id) => document.getElementById(id);
 const state = {
   engine: null,
   keymap: [],
-  active: new Map(), // note -> pointer/key token
+  // Pitch -> live key instance. An instance is a distinct press; its id is
+  // what note-off must release, so a retrigger of the same pitch can never be
+  // silenced by the previous press's key-up.
+  active: new Map(),
   heldNotes: new Set(),
   legs: new Map(), // note -> release timer
+  nextInstance: 1,
+  pedal: false,
   velocity: 96,
   legatoMs: 70,
   latched: false,
@@ -28,6 +33,8 @@ const UA = {
   legato: $('legato'),
   legatoOut: $('legatoOut'),
   latched: $('latched'),
+  pedalBtn: $('pedalBtn'),
+  keyInstances: $('keyInstances'),
   voiceLimit: $('voiceLimit'),
   capOut: $('capOut'),
   startBtn: $('startBtn'),
@@ -187,7 +194,9 @@ function renderVoices(snapshot, meters) {
     const pct = meters.cacheBudget ? Math.min(100, (meters.cacheUsed / meters.cacheBudget) * 100) : 0;
     UA.cacheBar.style.width = `${pct}%`;
     UA.cacheText.textContent = `${fmtBytes(meters.cacheUsed)} / ${fmtBytes(meters.cacheBudget)}`;
-    UA.audibleText.textContent = `${meters.graphVoices} 发声 / ${meters.tails} 尾音`;
+    UA.audibleText.textContent =
+      `${meters.graphVoices} 发声 / ${meters.tails} 尾音` +
+      (meters.sustainedVoices ? ` · 踏板 ${meters.sustainedVoices}` : '');
     UA.stealText.textContent = `${meters.steals} / ${snapshot.rejections}`;
     const lvl = meters.level ?? 0;
     // Map RMS to a perceptual-ish 0..100% for the bar.
@@ -220,6 +229,7 @@ function renderVoices(snapshot, meters) {
         const bars = v.layers
           .map((l) => `<i class="${l.layer}" style="width:${Math.max(0, Math.min(1, l.gain / Math.max(0.001, maxGain(v)))) * 100}%"></i>`)
           .join('');
+        const stateLabel = v.state === 'release' ? '释放中' : v.state === 'sustained' ? '踏板持有' : 'held';
         return `<div class="vrow ${v.state}">
           <span class="vn">${v.noteName}</span>
           <span>
@@ -227,7 +237,7 @@ function renderVoices(snapshot, meters) {
             <div class="bar-layer">${bars}</div>
             <span class="vz" style="font-size:9.5px;color:#6b7482">${escapeHtml(ranges)}</span>
           </span>
-          <span class="vs">${v.state === 'release' ? '释放中' : 'held'}<br>v${v.velocity}</span>
+          <span class="vs">${stateLabel}<br>v${v.velocity} · 读头 ${v.head ?? v.id}</span>
         </div>`;
       })
       .join('');
@@ -377,6 +387,7 @@ async function start() {
     const hint = document.querySelector('#velocity ~ .hint');
     if (hint) hint.textContent = `1–${instrumentBlend().lo - 1} 柔和层 · ${band} 交叉淡化 · ${instrumentBlend().hi}–127 明亮层`;
     renderVoices(engine.vm.snapshot(), engine._meters());
+    renderKeyInstances();
     UA.voiceCap.textContent = String(summary.maxVoices);
     await engine.resume();
     setStatus('running', `运行中 · ${summary.sampleRate} Hz · ${summary.zones} 键区`);
@@ -387,6 +398,7 @@ async function start() {
     const tick = () => {
       if (!state.engine) return;
       state.engine.sweep();
+      renderKeyInstances();
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
@@ -407,12 +419,25 @@ function press(note, source) {
     return;
   }
   const v = currentVelocity();
-  // If the same note is already sounding from another input, release it first
-  // so a repeat is a real new attack, not a silently ignored duplicate.
+  // A repeat of a pitch is a new key instance. Release the previous instance
+  // explicitly first so its key-up cannot later fire against the new one; the
+  // sustain pedal, if down, keeps the old instance sounding under its own id.
   if (state.heldNotes.has(note)) release(note);
+  const instance = state.nextInstance++;
   state.heldNotes.add(note);
+  state.active.set(note, instance);
   try {
     const res = engine.noteOn(note, v, source);
+    state.active.set(note, {
+      instance,
+      voiceId: res.voice.id,
+      head: res.voice.head,
+      note,
+      velocity: v,
+      mix: res.plan.mix.kind,
+      layers: res.plan.entries.map((e) => e.sample.name),
+      state: 'held',
+    });
     if (engine.ctx?.state === 'running') setStatus('running', `运行中 · ${engine.ctx.sampleRate} Hz`);
     renderLastEvent(res.plan, res.voice);
     paintKey(note, true, v);
@@ -427,9 +452,11 @@ function press(note, source) {
       }
     }
     renderVoices(engine.vm.snapshot(), engine._meters());
+    renderKeyInstances();
   } catch (err) {
     showError(err);
     state.heldNotes.delete(note);
+    state.active.delete(note);
   }
 }
 
@@ -438,22 +465,122 @@ function release(note) {
   state.heldNotes.delete(note);
   paintKey(note, false, 0);
   const engine = state.engine;
+  const inst = state.active.get(note);
+  const voiceId = typeof inst === 'object' ? inst.voiceId : null;
+  const fire = () => {
+    engine.noteOff(note, voiceId);
+    state.legs.delete(note);
+    // If this exact instance is no longer the pitch's current press, leave the
+    // record alone: the newer instance owns the key now.
+    if (state.active.get(note) === inst) state.active.delete(note);
+    renderVoices(engine.vm.snapshot(), engine._meters());
+    renderKeyInstances();
+  };
   if (state.legatoMs > 0 && state.heldNotes.size > 0) {
     // Another key is still held: delay this release to create overlap.
-    const t = setTimeout(() => {
-      engine.noteOff(note);
-      state.legs.delete(note);
-      renderVoices(engine.vm.snapshot(), engine._meters());
-    }, state.legatoMs);
+    const t = setTimeout(fire, state.legatoMs);
     state.legs.set(note, t);
   } else {
-    engine.noteOff(note);
+    fire();
   }
   renderVoices(engine.vm.snapshot(), engine._meters());
+  renderKeyInstances();
 }
 
 function releaseAll() {
   for (const n of [...state.heldNotes]) release(n);
+  for (const t of state.legs.values()) clearTimeout(t);
+  state.legs.clear();
+}
+
+// The pedal owns the sounds of keys already let go. It never owns a key that
+// is still physically down; that key releases on its own key-up.
+function setPedal(down) {
+  const engine = state.engine;
+  if (!engine) {
+    showError({ code: 'NOT_READY', message: '引擎尚未启动', hint: '先点击“启动引擎”' });
+    return;
+  }
+  if (down === state.pedal) return;
+  state.pedal = down;
+  if (down) engine.pedalDown();
+  else engine.pedalUp();
+  UA.pedalBtn.classList.toggle('engaged', down);
+  UA.pedalBtn.setAttribute('aria-pressed', String(down));
+  UA.pedalBtn.querySelector('.pedal-state').textContent = down ? '踩下' : '抬起';
+  renderVoices(engine.vm.snapshot(), engine._meters());
+  renderKeyInstances();
+}
+
+function togglePedal() {
+  setPedal(!state.pedal);
+}
+
+// Show the correspondence between each press instance, the velocity layers it
+// selected, the voice(s) it owns, and the sample read heads actually reading
+// those buffers. Sustained rows are owned by the pedal, not by the key.
+function renderKeyInstances() {
+  const engine = state.engine;
+  if (!engine) return;
+  const snap = engine.vm.snapshot();
+  const byVoice = new Map();
+  for (const v of snap.voices) byVoice.set(v.id, v);
+  const rows = [];
+  for (const rec of state.active.values()) {
+    if (typeof rec !== 'object') continue;
+    const v = byVoice.get(rec.voiceId);
+    const stateText = !v ? '已结束' : v.state === 'sustained' ? '踏板持有' : v.state === 'release' ? '释放中' : '按住';
+    const pedalOwned = v ? v.state === 'sustained' : false;
+    rows.push({
+      instance: rec.instance,
+      note: rec.note,
+      velocity: rec.velocity,
+      samples: rec.layers,
+      mix: rec.mix,
+      voiceId: rec.voiceId,
+      head: rec.head,
+      state: stateText,
+      pedalOwned,
+    });
+  }
+  // Pedal-held instances whose key was already released are no longer in
+  // state.active; surface them from the snapshot so ownership is complete.
+  const seen = new Set(rows.map((r) => r.voiceId));
+  for (const v of snap.voices) {
+    if (seen.has(v.id) || v.state !== 'sustained') continue;
+    rows.push({
+      instance: v.instance,
+      note: v.note,
+      velocity: v.velocity,
+      samples: v.layers.map((l) => l.sample),
+      mix: v.mix,
+      voiceId: v.id,
+      head: v.head,
+      state: '踏板持有',
+      pedalOwned: true,
+    });
+  }
+  rows.sort((a, b) => a.instance - b.instance);
+  if (rows.length === 0) {
+    UA.keyInstances.innerHTML =
+      `<div class="empty">按下实例 · 力度层 · 实际读头：演奏后显示每个按键实例拥有的声部与采样读头。</div>`;
+    return;
+  }
+  UA.keyInstances.innerHTML = `
+    <div class="ki-head">
+      <span>实例</span><span>音/力度</span><span>力度层 → 采样</span><span>声部 · 读头</span><span>状态</span>
+    </div>` +
+    rows
+      .map(
+        (r) => `<div class="ki-row ${r.state === '按住' ? 'held' : r.pedalOwned ? 'sustained' : ''}">
+          <span class="ki-i">#${r.instance}</span>
+          <span class="ki-n">${noteName(r.note)} · v${r.velocity}</span>
+          <span class="ki-l"><b class="${r.mix}">${r.mix}</b> ${escapeHtml(r.samples.join(' + '))}</span>
+          <span class="ki-v">#${r.voiceId} · 读头 ${r.head}</span>
+          <span class="ki-s">${r.state}</span>
+        </div>`,
+      )
+      .join('');
 }
 
 function wireKeyboard() {
@@ -497,6 +624,13 @@ function wireComputerKeyboard() {
       UA.velOut.textContent = String(next);
       return;
     }
+    // Hold Shift to sustain (sostenuto-style pedal): key-ups while it is down
+    // move their voices into the pedal-owned set instead of fading.
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+      e.preventDefault();
+      setPedal(true);
+      return;
+    }
     const note = KEYMAP_COMPUTER[e.key.toLowerCase()];
     if (note !== undefined && !e.repeat) {
       e.preventDefault();
@@ -505,6 +639,10 @@ function wireComputerKeyboard() {
     }
   });
   window.addEventListener('keyup', (e) => {
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+      setPedal(false);
+      return;
+    }
     const note = KEYMAP_COMPUTER[e.key.toLowerCase()];
     if (note !== undefined) release(note);
   });
@@ -517,11 +655,15 @@ function wireControls() {
     state.engine.panic();
     for (const n of state.heldNotes) paintKey(n, false, 0);
     state.heldNotes.clear();
+    state.active.clear();
     for (const t of state.legs.values()) clearTimeout(t);
     state.legs.clear();
+    if (state.pedal) setPedal(false);
     setStatus('running', '已全部静音');
     renderVoices(state.engine.vm.snapshot(), state.engine._meters());
+    renderKeyInstances();
   });
+  UA.pedalBtn.addEventListener('click', togglePedal);
   UA.velocity.addEventListener('input', () => {
     UA.velOut.textContent = UA.velocity.value;
   });
@@ -575,6 +717,10 @@ window.__sampler = {
   press,
   release,
   releaseAll,
+  setPedal,
+  pedalDown: () => setPedal(true),
+  pedalUp: () => setPedal(false),
+  pedalState: () => state.pedal,
   runLoopChecks,
   loadOfflineReport,
   setVelocity: (v) => {

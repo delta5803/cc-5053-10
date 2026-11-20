@@ -47,10 +47,17 @@
           <input id="latched" type="checkbox">
           <span>持续模式（按住延音，松开后可再触发）</span>
         </label>
+        <button id="pedalBtn" type="button" class="ghost pedal-btn" aria-pressed="false">
+          延音踏板 <span class="pedal-state">抬起</span>
+        </button>
         <label class="slider compact">
           <span>声部上限 <output id="capOut">24</output></span>
           <input id="voiceLimit" type="range" min="1" max="32" value="24">
         </label>
+      </div>
+
+      <div id="keyInstances" class="key-instances" aria-live="polite">
+        <div class="empty">按下实例 · 力度层 · 实际读头：演奏后显示每个按键实例拥有的声部与采样读头。</div>
       </div>
 
       <div id="voiceStrip" class="voice-strip" aria-live="polite">
@@ -66,7 +73,8 @@
 
       <div class="keyhow">
         <p><strong>点击/轻触</strong>琴键演奏，或用电脑键盘 <kbd>A</kbd><kbd>W</kbd><kbd>S</kbd><kbd>E</kbd><kbd>D</kbd><kbd>F</kbd><kbd>T</kbd><kbd>G</kbd><kbd>Y</kbd><kbd>H</kbd><kbd>U</kbd><kbd>J</kbd><kbd>K</kbd>（两排，C4 起）。
-        上下箭头调整力度，空格可触发当前高亮键。</p>
+        上下箭头调整力度，空格可触发当前高亮键。按 <kbd>Space</kbd> 右侧的延音踏板按钮或 <kbd>Shift</kbd> 可踩下/松开踏板：
+        踏板只接管你已松开的那些按键实例，仍按住的键不会被踏板带走。</p>
       </div>
     </section>
 

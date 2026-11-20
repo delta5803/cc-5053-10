@@ -86,6 +86,23 @@ Voices
   20 rapid repeats of C5: ok {"maxActive":5,"samples":["c5-hard"]}
   steal beyond cap 24: ok {"maxActive":24,"steals":8}
 
+Pedal retrigger (soft then hard on one pitch)
+  samples: soft c4-soft (rms 0.0832) vs hard c4-hard (rms 0.0883), 0.5 dB apart, distinct=true
+  instances: {"soft":{"id":1,"instance":1,"head":1},"hard":{"id":2,"instance":2,"head":2},"distinctInstances":true,"distinctHeads":true}
+  ownership: {"softHeldByPedalAfterKeyUp":true,"softReleasedOnPedalUp":true,"hardNotReleasedByFirstKeyUp":true,"hardStillSoundingBeforeLateCallback":true,"rule":"note-off follows the key instance; the pedal owns the set of already-released instances"}
+  mix: {"attack1Peak":0.0937,"attack2Peak":0.3596,"softTailPeak":0.1837,"hardTailPeak":0.1422,"bothAttacksAudible":true,"softTailAudible":true,"hardTailAudible":true}
+  read heads: {"soft":{"releaseAt":0.55,"end":0.73,"reason":"pedalUp"},"hard":{"releaseAt":0.8,"end":0.98,"reason":"noteOff"},"softReleasedAtPedalUp":true,"headsOverlap":true}
+  cache: {"pinsWhileBothSound":[{"key":"c4-soft","pins":1,"headsAlive":1,"at":0.33},{"key":"c4-hard","pins":1,"headsAlive":1,"at":0.33}],"unpinAudit":[{"key":"c4-soft","firstZeroAt":0.73,"maxPins":1,"pinEvents":2,"prematureFree":false},{"key":"c4-hard","firstZeroAt":0.98,"maxPins":1,"pinEvents":2,"prematureFree":false}],"refsReturnToZero":true,"noPrematureFree":true}
+  ok
+
+Pedal with one free voice
+  one free voice: new attack steals the old pedal tail: ok {"maxActive":1,"steals":1}
+    heads: [{"head":1,"voiceId":1,"note":60,"velocity":40,"start":0.05,"releaseAt":null,"stolenAt":0.3,"end":0.308},{"head":2,"voiceId":2,"note":60,"velocity":110,"start":0.3,"releaseAt":0.75,"stolenAt":null,"end":0.93}]
+    unpin: [{"key":"c4-soft","firstZeroAt":0.308,"maxPins":1,"pinEvents":2,"prematureFree":false},{"key":"c4-hard","firstZeroAt":0.93,"maxPins":1,"pinEvents":2,"prematureFree":false}]
+  one free voice: old pedal tail finishes naturally first: ok {"maxActive":1,"steals":0}
+    heads: [{"head":1,"voiceId":1,"note":60,"velocity":40,"start":0.05,"releaseAt":0.3,"stolenAt":null,"end":0.48},{"head":2,"voiceId":2,"note":60,"velocity":110,"start":0.55,"releaseAt":0.8,"stolenAt":null,"end":0.98}]
+    unpin: [{"key":"c4-soft","firstZeroAt":0.48,"maxPins":1,"pinEvents":2,"prematureFree":false},{"key":"c4-hard","firstZeroAt":0.98,"maxPins":1,"pinEvents":2,"prematureFree":false}]
+
 Cache
   budget smaller than one sample: ok [CACHE_TOO_SMALL]
   LRU eviction under budget: ok

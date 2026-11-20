@@ -121,6 +121,89 @@ test('extreme low velocity still starts a real voice', { skip }, async () => {
   await page.evaluate(() => window.__sampler.releaseAll());
 });
 
+test('key view records press instances, velocity layer and the actual read head', { skip }, async () => {
+  await page.evaluate(() => window.__sampler.state.engine.panic());
+  await page.evaluate(() => window.__sampler.setVelocity(100));
+  await page.evaluate(() => window.__sampler.press(60, 'test'));
+  await page.waitForTimeout(100);
+  const text = await page.locator('#keyInstances').innerText();
+  assert.match(text, /实例/);
+  assert.match(text, /读头/);
+  assert.match(text, /C4 · v100/);
+  assert.match(text, /hard/);
+  assert.match(text, /c4-hard/);
+  // The corresponding noteOn tick owns the same instance and head ids.
+  const tick = await page.evaluate(() => window.__sampler.getEvents().filter((t) => t.kind === 'noteOn').pop());
+  assert.ok(tick.voiceId > 0 && tick.head > 0);
+  assert.match(text, new RegExp(`#${tick.voiceId} · 读头 ${tick.head}`));
+  await page.evaluate(() => window.__sampler.releaseAll());
+});
+
+test('pedal owns released presses; a retrigger keeps its own instance', { skip }, async () => {
+  const res = await page.evaluate(async () => {
+    const eng = window.__sampler.state.engine;
+    eng.panic();
+    window.__sampler.setVelocity(40);
+    window.__sampler.press(60, 'pedal-test'); // soft instance
+    await new Promise((r) => setTimeout(r, 60));
+    window.__sampler.setVelocity(110);
+    window.__sampler.press(60, 'pedal-test'); // retrigger -> new instance
+    await new Promise((r) => setTimeout(r, 60));
+    window.__sampler.setPedal(true);
+    const beforeUp = eng.vm.snapshot();
+    // Release the currently-held key: it should become pedal-owned, not fade.
+    window.__sampler.release(60);
+    await new Promise((r) => setTimeout(r, 40));
+    const afterKeyUp = eng.vm.snapshot();
+    window.__sampler.setPedal(false);
+    await new Promise((r) => setTimeout(r, 40));
+    const afterPedalUp = eng.vm.snapshot();
+    return {
+      pedal: window.__sampler.pedalState(),
+      beforeUp: beforeUp.voices.map((v) => ({ id: v.id, state: v.state, instance: v.instance, head: v.head })),
+      sustainedAfterKeyUp: afterKeyUp.sustainedCount,
+      afterPedalUpStates: afterPedalUp.voices.map((v) => v.state),
+    };
+  });
+  assert.equal(res.pedal, false);
+  // Two distinct instances existed; each carries its own head id.
+  const instances = res.beforeUp.map((v) => v.instance);
+  assert.equal(new Set(instances).size, instances.length);
+  const heads = res.beforeUp.map((v) => v.head);
+  assert.equal(new Set(heads).size, heads.length);
+  assert.ok(res.sustainedAfterKeyUp >= 1, 'released key must be pedal-owned');
+  assert.ok(res.afterPedalUpStates.every((s) => s !== 'held' && s !== 'sustained'), 'pedal-up releases the set');
+  await page.evaluate(() => window.__sampler.state.engine.panic());
+});
+
+test('retrigger of one pitch produces two independent attacks in the engine', { skip }, async () => {
+  const res = await page.evaluate(async () => {
+    const eng = window.__sampler.state.engine;
+    eng.panic();
+    const a = eng.noteOn(60, 40, 'retrigger'); // soft
+    await new Promise((r) => setTimeout(r, 80));
+    const b = eng.noteOn(60, 110, 'retrigger'); // hard, same pitch
+    await new Promise((r) => setTimeout(r, 40));
+    // Releasing the first instance must not touch the second.
+    eng.noteOff(60, a.voice.id);
+    await new Promise((r) => setTimeout(r, 40));
+    const snap = eng.vm.snapshot();
+    return {
+      aId: a.voice.id,
+      bId: b.voice.id,
+      aHead: a.voice.head,
+      bHead: b.voice.head,
+      bStillHeld: snap.voices.some((v) => v.id === b.voice.id && v.state === 'held'),
+      aState: snap.voices.find((v) => v.id === a.voice.id)?.state ?? 'gone',
+    };
+  });
+  assert.notEqual(res.aId, res.bId);
+  assert.notEqual(res.aHead, res.bHead);
+  assert.equal(res.aState, 'release');
+  assert.equal(res.bStillHeld, true, 'the second attack must survive the first release');
+  await page.evaluate(() => window.__sampler.state.engine.panic());
+});
+
 test('rapid repeats of one note create distinct voices', { skip }, async () => {
   const result = await page.evaluate(async () => {
     const eng = window.__sampler.state.engine;

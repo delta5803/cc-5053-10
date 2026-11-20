@@ -222,6 +222,182 @@ test('same-note repeats are independent voices sharing one cached sample', () =>
   assert.equal(r.cache.entries.get('c5-hard').pins, 3);
 });
 
+// ---------------------------------------------------------------------------
+// Sustain pedal, key instances and read-head ownership
+// ---------------------------------------------------------------------------
+
+test('note-off follows the key instance, not the pitch: an old release never kills a retrigger', () => {
+  // Two presses of one pitch, each with its own instance tag. The first press
+  // is released while the second is still down: the old release must end only
+  // its own instance.
+  const r = render([
+    { type: 'on', note: 60, velocity: 40, time: 0.02, tag: 1 },
+    { type: 'on', note: 60, velocity: 110, time: 0.12, tag: 2 },
+    { type: 'off', note: 60, time: 0.20, tag: 1 },
+  ], { seconds: 1.2 });
+  const ons = r.voiceLog.filter((l) => l.kind === 'noteOn');
+  assert.equal(ons.length, 2);
+  const [first, second] = ons;
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.instance, second.instance);
+  // Only the first instance was released; the second stays held.
+  const offs = r.voiceLog.filter((l) => l.kind === 'noteOff');
+  assert.equal(offs.length, 1);
+  assert.equal(offs[0].id, first.id);
+  assert.ok(r.voiceManager.voices.has(second.id), 'retriggered voice must remain held');
+  assert.equal(r.voiceManager.voices.get(second.id).state, 'held');
+});
+
+test('pedal owns already-released instances as a set and survives until pedal-up', () => {
+  const vm = new VoiceManager(instrument, new SampleCache(instrument, { cacheBytes: residentBytes(instrument) }));
+  for (const rec of manifest.notes) vm.cache.put(rec.name, pcm.get(rec.name));
+  const first = vm.noteOn(60, 40, 0).voice;
+  vm.pedalDown(0.01);
+  assert.equal(vm.noteOffVoice(first, 0.05), true);
+  assert.equal(first.state, 'sustained', 'released key under pedal is pedal-owned');
+  assert.equal(vm.sustainedCount(), 1);
+  // A second press on the same pitch is a different instance and remains held.
+  const second = vm.noteOn(60, 110, 0.1).voice;
+  assert.equal(second.state, 'held');
+  assert.notEqual(second.instance, first.instance);
+  // Pedal-up releases the pedal-owned set, not the held key.
+  vm.pedalUp(0.2);
+  assert.equal(first.state, 'release');
+  assert.equal(second.state, 'held');
+});
+
+test('a key still held at pedal-up is not pedal-owned and stays sounding', () => {
+  const vm = new VoiceManager(instrument, new SampleCache(instrument, { cacheBytes: residentBytes(instrument) }));
+  for (const rec of manifest.notes) vm.cache.put(rec.name, pcm.get(rec.name));
+  const held = vm.noteOn(60, 110, 0).voice;
+  vm.pedalDown(0.01);
+  const released = vm.noteOn(64, 40, 0.02).voice;
+  vm.noteOffVoice(released, 0.05);
+  assert.equal(released.state, 'sustained');
+  vm.pedalUp(0.1);
+  assert.equal(released.state, 'release');
+  assert.equal(held.state, 'held', 'a physically-held key must survive pedal-up');
+});
+
+test('pedal retrigger: soft then hard on one pitch, each attack and tail audible, refs return cleanly', () => {
+  const softSel = selectSample(instrument, 60, 40);
+  const hardSel = selectSample(instrument, 60, 110);
+  assert.notEqual(softSel.entries[0].sample.name, hardSel.entries[0].sample.name);
+  const r = render([
+    { type: 'pedal', down: true, time: 0.02 },
+    { type: 'on', note: 60, velocity: 40, time: 0.05, tag: 'soft' },
+    { type: 'on', note: 60, velocity: 110, time: 0.28, tag: 'hard' },
+    { type: 'off', note: 60, time: 0.34, tag: 'soft' },
+    { type: 'pedal', down: false, time: 0.55 },
+    { type: 'off', note: 60, time: 0.80, tag: 'hard' },
+  ], { seconds: 1.6 });
+  const ons = r.voiceLog.filter((l) => l.kind === 'noteOn');
+  const softOn = ons.find((l) => l.tag === 'soft');
+  const hardOn = ons.find((l) => l.tag === 'hard');
+  // Both attacks exist and use different recordings and read heads.
+  assert.ok(softOn && hardOn);
+  assert.notEqual(softOn.id, hardOn.id);
+  assert.notEqual(softOn.head, hardOn.head);
+  // The soft instance goes to the pedal at key-up, the hard instance does not.
+  assert.ok(r.voiceLog.some((l) => l.kind === 'pedalHold' && l.id === softOn.id));
+  assert.ok(!r.voiceLog.some((l) => l.kind === 'noteOff' && l.id === hardOn.id && l.time < 0.79));
+  assert.ok(r.voiceLog.some((l) => l.kind === 'pedalUpRelease' && l.id === softOn.id));
+  // Measure each attack and each release tail independently in the mix.
+  const peak = (t, d) => {
+    let p = 0;
+    const a = Math.floor(t * SR);
+    const b = Math.min(r.pcm.length, Math.floor((t + d) * SR));
+    for (let i = a; i < b; i++) p = Math.max(p, Math.abs(r.pcm[i]));
+    return p;
+  };
+  assert.ok(peak(0.06, 0.06) > 0.01, 'soft attack must be audible');
+  assert.ok(peak(0.29, 0.06) > 0.01, 'hard attack must be audible');
+  assert.ok(peak(0.57, 0.16) > 0.005, 'soft pedal tail must be audible after pedal-up');
+  assert.ok(peak(0.82, 0.16) > 0.005, 'hard release tail must be audible');
+  // Read heads: the soft head releases at pedal-up, not at its key-up.
+  const softHead = r.heads.find((h) => h.head === softOn.head);
+  const hardHead = r.heads.find((h) => h.head === hardOn.head);
+  assert.ok(Math.abs(softHead.releaseAt - 0.55) < 1e-6, `soft head released at ${softHead.releaseAt}`);
+  assert.ok(softHead.end >= hardHead.start, 'soft pedal tail overlaps the hard attack');
+  // No recording was freed while a read head still used it.
+  const audit = (key) => {
+    const zero = r.pinTrace.find((e) => e.key === key && e.pins === 0);
+    assert.ok(zero, `${key} must be unpinned`);
+    const busy = r.heads.some(
+      (h) => h.layer.split('+').includes(key) && h.start < zero.time - 1e-9 && h.end > zero.time + 1e-9,
+    );
+    assert.equal(busy, false, `${key} freed at ${zero.time} while a head still read it`);
+  };
+  audit(softSel.entries[0].sample.name);
+  audit(hardSel.entries[0].sample.name);
+  assert.equal(r.cache.refs(softSel.entries[0].sample.name), 0);
+  assert.equal(r.cache.refs(hardSel.entries[0].sample.name), 0);
+});
+
+test('one free voice: stealing a pedal tail frees the old head only after its fade', () => {
+  const oldKey = selectSample(instrument, 60, 40).entries[0].sample.name;
+  const newKey = selectSample(instrument, 60, 110).entries[0].sample.name;
+  const r = new OfflineRenderer(instrument, pcm, { maxVoices: 1 }).render([
+    { type: 'pedal', down: true, time: 0.02 },
+    { type: 'on', note: 60, velocity: 40, time: 0.05, tag: 'old' },
+    { type: 'off', note: 60, time: 0.20, tag: 'old' },
+    { type: 'on', note: 60, velocity: 110, time: 0.30, tag: 'new' },
+    { type: 'pedal', down: false, time: 0.60 },
+    { type: 'off', note: 60, time: 0.75, tag: 'new' },
+  ], { seconds: 1.4 });
+  assert.equal(r.maxActive, 1);
+  assert.ok(r.voiceManager.steals >= 1);
+  const newOn = r.voiceLog.find((l) => l.kind === 'noteOn' && l.tag === 'new');
+  const oldHead = r.heads.find((h) => h.velocity === 40);
+  const newHead = r.heads.find((h) => h.head === newOn.head);
+  // The new attack is alive at its onset; the old head fades within the steal
+  // tail and does not keep a voice forever.
+  assert.ok(newHead.start <= 0.31 && newHead.end > 0.31);
+  assert.ok(oldHead.stolenAt !== null, 'old pedal tail must be interrupted');
+  const fade = oldHead.end - oldHead.stolenAt;
+  assert.ok(fade <= instrument.cfg.stealReleaseMs / 1000 + 0.01, `old tail faded in ${fade}s`);
+  // The old recording is released exactly when its head ends, and the new one
+  // stays pinned until its own release tail ends.
+  const zeroOld = r.pinTrace.filter((e) => e.key === oldKey && e.pins === 0).pop();
+  assert.ok(zeroOld);
+  assert.ok(Math.abs(zeroOld.time - oldHead.end) < 0.02, `old unpinned at ${zeroOld.time}, head ended ${oldHead.end}`);
+  assert.equal(r.cache.refs(oldKey), 0, 'old sample refcount must return to zero');
+  assert.equal(r.cache.refs(newKey), 0, 'new sample refcount must return to zero after its release');
+});
+
+test('one free voice: a pedal tail that finished first needs no steal and frees both recordings once', () => {
+  const releaseSec = instrument.cfg.releaseMs / 1000;
+  const tPedalUp = 0.30;
+  const tNew = tPedalUp + releaseSec + 0.07;
+  const r = new OfflineRenderer(instrument, pcm, { maxVoices: 1 }).render([
+    { type: 'pedal', down: true, time: 0.02 },
+    { type: 'on', note: 60, velocity: 40, time: 0.05, tag: 'old' },
+    { type: 'off', note: 60, time: 0.20, tag: 'old' },
+    { type: 'pedal', down: false, time: tPedalUp },
+    { type: 'on', note: 60, velocity: 110, time: tNew, tag: 'new' },
+    { type: 'off', note: 60, time: tNew + 0.25, tag: 'new' },
+  ], { seconds: 1.6 });
+  assert.equal(r.voiceManager.steals, 0);
+  assert.equal(r.maxActive, 1);
+  const ons = r.voiceLog.filter((l) => l.kind === 'noteOn');
+  assert.equal(ons.length, 2);
+  const oldHead = r.heads.find((h) => h.velocity === 40);
+  const newHead = r.heads.find((h) => h.velocity === 110);
+  assert.ok(oldHead.end <= newHead.start + 1e-6, 'old head must end before the new one starts');
+  for (const key of [
+    selectSample(instrument, 60, 40).entries[0].sample.name,
+    selectSample(instrument, 60, 110).entries[0].sample.name,
+  ]) {
+    assert.equal(r.cache.refs(key), 0, `${key} refs must return to zero`);
+    const zero = r.pinTrace.find((e) => e.key === key && e.pins === 0);
+    const busy = r.heads.some(
+      (h) => h.layer.split('+').includes(key) && h.start < zero.time - 1e-9 && h.end > zero.time + 1e-9,
+    );
+    assert.equal(busy, false, `${key} freed while still read`);
+  }
+});
+
+
 test('voice steal holds the cap and prefers releasing voices', () => {
   const cap = 8;
   const events = [];
